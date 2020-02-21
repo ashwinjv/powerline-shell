@@ -9,6 +9,32 @@ import json
 from .utils import warn, py3, import_file
 import re
 
+def _get_tmux_current_dir():
+    """
+    in TMUX use an aliased cd to save the cwd to a env variable that is then
+    read by this function. Here is the bash alias
+
+        function set_tmux_pwd() {
+            [ -n "$TMUX" ] && tmux setenv TMUXPWD_$(tmux display -p "#D" | tr -d %) "$PWD"
+            [ -n "$TMUX" ] && tmux refresh-client -S
+            return 0
+        }
+        function my_cd() {
+            \cd $1
+            set_tmux_pwd
+        }
+
+        set_tmux_pwd
+        alias cd=my_cd
+
+    """
+    pane = os.popen("tmux display -p '#D'").read().strip().replace("%", "")
+    if pane:
+        pwdEnv = os.popen("tmux show-environment TMUXPWD_{}".format(pane)).read().strip().split("=")
+        if pwdEnv:
+            os.chdir(pwdEnv[-1])
+            return pwdEnv[-1]
+    return os.getenv("PWD") or os.getcwd()
 
 def _current_dir():
     """Returns the full current working directory as the user would have used
@@ -24,6 +50,8 @@ def _current_dir():
     `os.getcwd` function follows symbolic links, which is undesirable."""
     if os.name == "nt":
         return os.getcwd()
+    if os.getenv("TMUX"):
+        return _get_tmux_current_dir()
     return os.getenv("PWD") or os.getcwd()
 
 
@@ -81,6 +109,31 @@ class Powerline(object):
         'tcsh': r'%%{\e%s%%}',
         'zsh': '%%{%s%%}',
         'bare': '%s',
+        'tmux': '#[%s]'
+    }
+
+    fg_keys = {
+        'bash': '38',
+        'tcsh': '38',
+        'zsh': '38',
+        'bare': '38',
+        "tmux": "fg",
+    }
+
+    bg_keys = {
+        'bash': '48',
+        'tcsh': '48',
+        'zsh': '48',
+        'bare': '48',
+        "tmux": r"bg"
+    }
+
+    shell_color_escapes = {
+        'bash': '[%s;5;%sm',
+        'tcsh': '[%s;5;%sm',
+        'zsh': '[%s;5;%sm',
+        'bare': '[%s;5;%sm',
+        "tmux": "%s=colour%s"
     }
 
     def __init__(self, args, config, theme):
@@ -90,6 +143,9 @@ class Powerline(object):
         self.cwd = get_valid_cwd()
         mode = config.get("mode", "patched")
         self.color_template = self.color_templates[args.shell]
+        self.shell_color_escape = self.shell_color_escapes[args.shell]
+        self.fg_key = self.fg_keys[args.shell]
+        self.bg_key = self.bg_keys[args.shell]
         self.reset = self.color_template % '[0m'
         self.lock = Powerline.symbols[mode]['lock']
         self.network = Powerline.symbols[mode]['network']
@@ -106,13 +162,13 @@ class Powerline(object):
         elif code == self.theme.RESET:
             return self.reset
         else:
-            return self.color_template % ('[%s;5;%sm' % (prefix, code))
+            return self.color_template % (self.shell_color_escape % (prefix, code))
 
     def fgcolor(self, code):
-        return self.color('38', code)
+        return self.color(self.fg_key, code)
 
     def bgcolor(self, code):
-        return self.color('48', code)
+        return self.color(self.bg_key, code)
 
     def append(self, content, fg, bg, separator=None, separator_fg=None, sanitize=True):
         if self.args.shell == "bash" and sanitize:
@@ -142,14 +198,15 @@ class Powerline(object):
             segment[3]))
 
 
-def find_config():
+def find_config(config=''):
     for location in [
+        config,
         "powerline-shell.json",
         "~/.powerline-shell.json",
         os.path.join(os.environ.get("XDG_CONFIG_HOME", "~/.config"), "powerline-shell", "config.json"),
     ]:
         full = os.path.expanduser(location)
-        if os.path.exists(full):
+        if full and os.path.exists(full):
             return full
 
 DEFAULT_CONFIG = {
@@ -195,7 +252,9 @@ def main():
                             help='Generate the default config and print it to stdout')
     arg_parser.add_argument('--shell', action='store', default='bash',
                             help='Set this to your shell type',
-                            choices=['bash', 'tcsh', 'zsh', 'bare'])
+                            choices=['bash', 'tcsh', 'zsh', 'bare', 'tmux'])
+    arg_parser.add_argument('--config', action='store', default='',
+                            help='Config file location')
     arg_parser.add_argument('prev_error', nargs='?', type=int, default=0,
                             help='Error code returned by the last command')
     args = arg_parser.parse_args()
@@ -204,7 +263,7 @@ def main():
         print(json.dumps(DEFAULT_CONFIG, indent=2))
         return 0
 
-    config_path = find_config()
+    config_path = find_config(args.config)
     if config_path:
         with open(config_path) as f:
             try:
